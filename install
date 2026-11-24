@@ -1,0 +1,74 @@
+#!/bin/sh
+# Install the published mousr binary.
+set -eu
+
+VERSION="@@VERSION@@"
+BASE_URL="https://packages.toxdes.com/releases"
+SHA256_amd64="@@SHA256_amd64@@"
+SHA256_arm64="@@SHA256_arm64@@"
+PREFIX="${INSTALL_PREFIX:-${HOME:?HOME must be set}/.local}"
+UNINSTALL=0
+
+fail() { printf 'mousr: %s\n' "$*" >&2; exit 1; }
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --prefix) [ "$#" -ge 2 ] || fail '--prefix needs a path'; PREFIX=$2; shift 2 ;;
+        --uninstall) UNINSTALL=1; shift ;;
+        --help|-h) printf 'Usage: sh install [--prefix PATH] [--uninstall]\nDefault prefix: INSTALL_PREFIX or ~/.local\n'; exit 0 ;;
+        *) fail "unknown option: $1" ;;
+    esac
+done
+case "$PREFIX" in /*) ;; *) fail 'install prefix must be an absolute path' ;; esac
+for path in "$PREFIX" "$PREFIX/bin" "$PREFIX/bin/mousr"; do
+    [ ! -L "$path" ] || fail "refusing symbolic-link destination: $path"
+done
+
+if [ "$UNINSTALL" = 1 ]; then
+    [ -e "$PREFIX/bin/mousr" ] || { printf 'No mousr installation in %s\n' "$PREFIX"; exit 0; }
+    [ -f "$PREFIX/bin/mousr" ] || fail "not a regular installed file: $PREFIX/bin/mousr"
+    rm -f "$PREFIX/bin/mousr"
+    printf 'Uninstalled mousr from %s\n' "$PREFIX"
+    exit 0
+fi
+
+[ "$(uname -s)" = Linux ] || fail 'mousr supports Linux only'
+case "$(uname -m)" in
+    x86_64|amd64) ARCH=amd64; EXPECTED=$SHA256_amd64 ;;
+    aarch64|arm64) ARCH=arm64; EXPECTED=$SHA256_arm64 ;;
+    *) fail 'supported architectures: amd64 and arm64' ;;
+esac
+for tool in curl tar install mktemp awk sha256sum; do
+    command -v "$tool" >/dev/null 2>&1 || fail "required tool not found: $tool"
+done
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/mousr-install.XXXXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+trap 'exit 1' HUP INT TERM
+NAME="mousr_${VERSION}_${ARCH}.tar.gz"
+printf '[+] Downloading %s\n' "$NAME"
+curl --proto "=https" --proto-redir "=https" --fail --progress-bar --show-error --location --retry 3 --connect-timeout 10 --max-time 300 \
+    "$BASE_URL/$NAME" -o "$WORK/bundle.tar.gz"
+ACTUAL=$(sha256sum "$WORK/bundle.tar.gz" | awk '{print $1}')
+[ "$ACTUAL" = "$EXPECTED" ] || fail 'checksum mismatch; nothing was installed'
+
+# Reject unsafe paths, links and special files before extracting.
+tar -tzf "$WORK/bundle.tar.gz" > "$WORK/members" || fail 'invalid release archive'
+awk '/^\// || /(^|\/)\.\.(\/|$)/ || /\\/ {exit 1} END {if (NR == 0) exit 1}' "$WORK/members" || fail 'unsafe release archive paths'
+tar -tvzf "$WORK/bundle.tar.gz" > "$WORK/types" || fail 'invalid release archive'
+awk 'substr($0,1,1) != "-" && substr($0,1,1) != "d" {exit 1}' "$WORK/types" || fail 'release archive contains links or special files'
+mkdir "$WORK/unpacked"
+tar -xzf "$WORK/bundle.tar.gz" -C "$WORK/unpacked" --no-same-owner
+[ -f "$WORK/unpacked/usr/bin/mousr" ] || fail 'release archive has no usr/bin/mousr'
+
+[ -w "$PREFIX" ] || [ ! -e "$PREFIX" ] || fail "prefix is not writable: $PREFIX"
+install -d "$PREFIX/bin"
+# Stage beside the destination for an atomic replacement.
+STAGED=$(mktemp "$PREFIX/bin/.mousr-install.XXXXXXXX")
+trap 'rm -f "$STAGED"; rm -rf "$WORK"' EXIT
+install -m 755 "$WORK/unpacked/usr/bin/mousr" "$STAGED"
+mv -f "$STAGED" "$PREFIX/bin/mousr"
+printf 'Installed mousr %s in %s\n' "$VERSION" "$PREFIX"
+case ":${PATH:-}:" in
+    *":$PREFIX/bin:"*) ;;
+    *) printf 'Add %s/bin to your PATH.\n' "$PREFIX" ;;
+esac

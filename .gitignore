@@ -1,0 +1,4 @@
+.DS_Store
+findings-*.md
+.worktrees
+dist/
